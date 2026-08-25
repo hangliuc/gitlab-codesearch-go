@@ -59,3 +59,7 @@ go build -o gls .
 | `-v`, `--verbose` | 输出详细执行日志 |
 
 `--group` 和 `--project` 必须且只能指定一个。Token 需要具备目标资源的读取权限，通常使用 `read_api` 或 `api` 权限即可。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
