@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gls/internal/model"
 )
@@ -70,23 +71,102 @@ func writeJSON(name string, r []model.SearchResult) error {
 	return enc.Encode(r)
 }
 func printTable(w io.Writer, results []model.SearchResult) error {
-	fmt.Fprintf(w, "\n🔎 搜索结果  共 %d 项\n\n", len(results))
-	for index, r := range results {
-		location := fmt.Sprintf("%s:%d", r.FilePath, r.LineNumber)
-		fmt.Fprintf(w, "┌─ %d/%d  %s\n", index+1, len(results), r.ProjectName)
-		fmt.Fprintf(w, "│  关键字  %s\n", r.Keyword)
-		fmt.Fprintf(w, "│  位置    %s  ·  %s\n", location, r.Branch)
-		fmt.Fprintln(w, "│  代码")
-		for _, line := range previewLines(r.LineContent, 8, 180) {
-			fmt.Fprintf(w, "│    %s\n", line)
-		}
-		fmt.Fprintf(w, "│  链接    %s\n", r.URL)
-		fmt.Fprintln(w, "└────────────────────────────────────────────────────────────────")
-		if index+1 < len(results) {
-			fmt.Fprintln(w)
+	fmt.Fprintf(w, "\n🔎 搜索结果（共 %d 项）\n\n", len(results))
+	columns := []tableColumn{
+		{title: "项目名称", width: 24},
+		{title: "关键字", width: 34},
+		{title: "文件路径:行号", width: 22},
+		{title: "代码片段", width: 78},
+		{title: "分支", width: 10},
+	}
+	writeBorder(w, columns, "┏", "┳", "┓", "━")
+	writeTableRow(w, columns, [][]string{{"项目名称"}, {"关键字"}, {"文件路径:行号"}, {"代码片段"}, {"分支"}})
+	writeBorder(w, columns, "┣", "╋", "┫", "━")
+	for i, r := range results {
+		writeTableRow(w, columns, [][]string{
+			{r.ProjectName},
+			{r.Keyword},
+			{fmt.Sprintf("%s:%d", r.FilePath, r.LineNumber)},
+			previewLines(r.LineContent, 8, columns[3].width),
+			{r.Branch},
+		})
+		if i+1 < len(results) {
+			writeBorder(w, columns, "┣", "╋", "┫", "─")
 		}
 	}
+	writeBorder(w, columns, "┗", "┻", "┛", "━")
 	return nil
+}
+
+type tableColumn struct {
+	title string
+	width int
+}
+
+func writeBorder(w io.Writer, columns []tableColumn, left, middle, right, fill string) {
+	fmt.Fprint(w, left)
+	for i, column := range columns {
+		fmt.Fprint(w, strings.Repeat(fill, column.width+2))
+		if i+1 == len(columns) {
+			fmt.Fprintln(w, right)
+		} else {
+			fmt.Fprint(w, middle)
+		}
+	}
+}
+
+func writeTableRow(w io.Writer, columns []tableColumn, cells [][]string) {
+	height := 1
+	for _, cell := range cells {
+		if len(cell) > height {
+			height = len(cell)
+		}
+	}
+	for line := 0; line < height; line++ {
+		fmt.Fprint(w, "┃")
+		for i, column := range columns {
+			value := ""
+			if line < len(cells[i]) {
+				value = truncateCell(cells[i][line], column.width)
+			}
+			fmt.Fprintf(w, " %s%s ┃", value, strings.Repeat(" ", column.width-displayWidth(value)))
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+func truncateCell(value string, width int) string {
+	if displayWidth(value) <= width {
+		return value
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range value {
+		runeWidth := displayWidth(string(r))
+		if used+runeWidth > width-1 {
+			break
+		}
+		b.WriteRune(r)
+		used += runeWidth
+	}
+	return b.String() + "…"
+}
+
+// displayWidth is sufficient for terminal tables: most CJK characters occupy
+// two columns and ordinary runes occupy one.
+func displayWidth(value string) int {
+	width := 0
+	for _, r := range value {
+		switch {
+		case r == '\t':
+			width += 4
+		case r < utf8.RuneSelf:
+			width++
+		default:
+			width += 2
+		}
+	}
+	return width
 }
 
 // previewLines retains code readability in the terminal without allowing a

@@ -35,3 +35,12 @@ func TestPreviewLinesPreservesIndentAndLimitsOutput(t *testing.T) {
 		t.Fatalf("unexpected preview: %#v", got)
 	}
 }
+
+func TestTruncateCellUsesTerminalWidth(t *testing.T) {
+	if got := truncateCell("abcdef", 3); got != "ab…" {
+		t.Fatalf("unexpected truncation: %q", got)
+	}
+	if got := truncateCell("搜索结果", 5); got != "搜索…" {
+		t.Fatalf("unexpected CJK truncation: %q", got)
+	}
+}
