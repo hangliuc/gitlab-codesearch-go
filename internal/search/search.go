@@ -6,16 +6,26 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"gls/internal/gitlab"
 	"gls/internal/model"
 )
 
 type Service struct {
-	Client  *gitlab.Client
-	Workers int
-	Verbose bool
-	Logf    func(string, ...any)
+	Client   *gitlab.Client
+	Workers  int
+	Verbose  bool
+	Logf     func(string, ...any)
+	Progress func(Progress)
+}
+
+// Progress describes group-search completion. Completed counts one
+// project-and-keyword search task.
+type Progress struct {
+	Completed int
+	Total     int
+	Projects  int
 }
 
 func (s Service) Project(ctx context.Context, projectID int, keywords []string, branch string) ([]model.SearchResult, error) {
@@ -46,6 +56,8 @@ func (s Service) Group(ctx context.Context, groupID int, keywords []string, bran
 	if workers <= 0 {
 		workers = 10
 	}
+	total := len(projects) * len(keywords)
+	s.progress(0, total, len(projects))
 	type job struct {
 		project model.Project
 		keyword string
@@ -53,6 +65,7 @@ func (s Service) Group(ctx context.Context, groupID int, keywords []string, bran
 	jobs := make(chan job)
 	out := make(chan []model.SearchResult)
 	var wg sync.WaitGroup
+	var completed atomic.Int64
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -63,9 +76,11 @@ func (s Service) Group(ctx context.Context, groupID int, keywords []string, bran
 					if s.Verbose {
 						s.log("项目 %s 搜索 %q 失败: %v", j.project.Name, j.keyword, err)
 					}
+					s.progress(int(completed.Add(1)), total, len(projects))
 					continue
 				}
 				out <- hits
+				s.progress(int(completed.Add(1)), total, len(projects))
 			}
 		}()
 	}
@@ -86,6 +101,12 @@ func (s Service) Group(ctx context.Context, groupID int, keywords []string, bran
 	return results, nil
 }
 
+func (s Service) progress(completed, total, projects int) {
+	if s.Progress != nil {
+		s.Progress(Progress{Completed: completed, Total: total, Projects: projects})
+	}
+}
+
 func (s Service) search(ctx context.Context, project model.Project, keyword, branch string) ([]model.SearchResult, error) {
 	if s.Verbose {
 		s.log("搜索项目 %d (%s), 关键字: %s", project.ID, branch, keyword)
@@ -101,11 +122,27 @@ func (s Service) search(ctx context.Context, project model.Project, keyword, bra
 		if path == "" {
 			path = hit.Filename
 		}
-		line := hit.StartLine + 1
+		line := matchLineNumber(hit.StartLine, hit.Data, keyword)
 		results = append(results, model.SearchResult{Keyword: keyword, ProjectID: project.ID, ProjectName: project.Name, Branch: branch, ProjectPath: project.WebURL, FilePath: path, LineNumber: line, LineContent: strings.TrimSpace(hit.Data), URL: fmt.Sprintf("%s/-/blob/%s/%s#L%d", project.WebURL, escapedBranch, encodePath(path), line)})
 	}
 	return results, nil
 }
+
+// matchLineNumber converts GitLab's snippet start line into the exact line
+// containing the keyword. A blob search result can include surrounding context,
+// so StartLine alone often points to an earlier line than the actual match.
+func matchLineNumber(startLine int, snippet, keyword string) int {
+	if startLine < 1 {
+		startLine = 1
+	}
+	for offset, line := range strings.Split(snippet, "\n") {
+		if strings.Contains(line, keyword) {
+			return startLine + offset
+		}
+	}
+	return startLine
+}
+
 func encodePath(path string) string {
 	parts := strings.Split(path, "/")
 	for i := range parts {

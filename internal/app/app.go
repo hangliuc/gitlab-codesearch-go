@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
+	"time"
 
 	"gls/internal/gitlab"
 	"gls/internal/model"
@@ -60,6 +62,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if *project != 0 {
 			found, err = svc.Project(ctx, *project, keywords, branch)
 		} else {
+			svc.Progress = progressReporter(stderr, *group, branch)
 			found, err = svc.Group(ctx, *group, keywords, branch)
 		}
 		if err != nil {
@@ -74,6 +77,36 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, output.SuccessMessage(*outputFile))
 	}
 	return nil
+}
+
+// progressReporter renders one in-place progress bar per group and branch.
+// Its mutex makes concurrent worker updates safe for any io.Writer.
+func progressReporter(w io.Writer, groupID int, branch string) func(search.Progress) {
+	var mu sync.Mutex
+	var started, lastUpdate time.Time
+	return func(progress search.Progress) {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if started.IsZero() {
+			started = now
+		}
+		if progress.Total > 0 && progress.Completed < progress.Total && now.Sub(lastUpdate) < 100*time.Millisecond {
+			return
+		}
+		lastUpdate = now
+		percent := 100
+		if progress.Total > 0 {
+			percent = progress.Completed * 100 / progress.Total
+		}
+		filled := percent * 40 / 100
+		bar := strings.Repeat("━", filled) + strings.Repeat("─", 40-filled)
+		elapsed := now.Sub(started).Truncate(time.Second)
+		fmt.Fprintf(w, "\r搜索分组 %d · %s（%d 个项目） %s %3d%% %s", groupID, branch, progress.Projects, bar, percent, elapsed)
+		if progress.Total == 0 || progress.Completed >= progress.Total {
+			fmt.Fprintln(w)
+		}
+	}
 }
 
 type stringList []string
