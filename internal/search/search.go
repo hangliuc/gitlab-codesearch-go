@@ -1,0 +1,120 @@
+package search
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+
+	"gls/internal/gitlab"
+	"gls/internal/model"
+)
+
+type Service struct {
+	Client  *gitlab.Client
+	Workers int
+	Verbose bool
+	Logf    func(string, ...any)
+}
+
+func (s Service) Project(ctx context.Context, projectID int, keywords []string, branch string) ([]model.SearchResult, error) {
+	project, err := s.Client.Project(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	var results []model.SearchResult
+	for _, keyword := range keywords {
+		hits, err := s.search(ctx, project, keyword, branch)
+		if err != nil {
+			if s.Verbose {
+				s.log("项目 %d 搜索 %q 失败: %v", projectID, keyword, err)
+			}
+			continue
+		}
+		results = append(results, hits...)
+	}
+	return results, nil
+}
+
+func (s Service) Group(ctx context.Context, groupID int, keywords []string, branch string) ([]model.SearchResult, error) {
+	projects, err := s.Client.GroupProjects(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	workers := s.Workers
+	if workers <= 0 {
+		workers = 10
+	}
+	type job struct {
+		project model.Project
+		keyword string
+	}
+	jobs := make(chan job)
+	out := make(chan []model.SearchResult)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				hits, err := s.search(ctx, j.project, j.keyword, branch)
+				if err != nil {
+					if s.Verbose {
+						s.log("项目 %s 搜索 %q 失败: %v", j.project.Name, j.keyword, err)
+					}
+					continue
+				}
+				out <- hits
+			}
+		}()
+	}
+	go func() {
+		for _, p := range projects {
+			for _, k := range keywords {
+				jobs <- job{p, k}
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		close(out)
+	}()
+	var results []model.SearchResult
+	for hits := range out {
+		results = append(results, hits...)
+	}
+	return results, nil
+}
+
+func (s Service) search(ctx context.Context, project model.Project, keyword, branch string) ([]model.SearchResult, error) {
+	if s.Verbose {
+		s.log("搜索项目 %d (%s), 关键字: %s", project.ID, branch, keyword)
+	}
+	hits, err := s.Client.SearchBlobs(ctx, project.ID, keyword, branch)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]model.SearchResult, 0, len(hits))
+	escapedBranch := url.PathEscape(branch)
+	for _, hit := range hits {
+		path := hit.Path
+		if path == "" {
+			path = hit.Filename
+		}
+		line := hit.StartLine + 1
+		results = append(results, model.SearchResult{Keyword: keyword, ProjectID: project.ID, ProjectName: project.Name, Branch: branch, ProjectPath: project.WebURL, FilePath: path, LineNumber: line, LineContent: strings.TrimSpace(hit.Data), URL: fmt.Sprintf("%s/-/blob/%s/%s#L%d", project.WebURL, escapedBranch, encodePath(path), line)})
+	}
+	return results, nil
+}
+func encodePath(path string) string {
+	parts := strings.Split(path, "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
+	}
+	return strings.Join(parts, "/")
+}
+func (s Service) log(format string, args ...any) {
+	if s.Logf != nil {
+		s.Logf(format, args...)
+	}
+}
